@@ -35,7 +35,7 @@ func TestBytesBatcherTriggerMaxBatchSize(t *testing.T) {
 	for j := 0; j < loops; j++ {
 		for i := 0; i < bb.MaxBatchSize; i++ {
 			s := fmt.Sprintf("%d", i%bb.MaxBatchSize)
-			ok := bb.Push(func(b []byte) []byte {
+			ok := bb.Push(func(b []byte, _ int) []byte {
 				return append(b, s...)
 			})
 			if !ok {
@@ -80,7 +80,7 @@ func TestBytesBatcherTriggerMaxDelay(t *testing.T) {
 
 	for i := 0; i < 6; i++ {
 		s := fmt.Sprintf("%d", i)
-		ok := bb.Push(func(b []byte) []byte {
+		ok := bb.Push(func(b []byte, _ int) []byte {
 			return append(b, s...)
 		})
 		if !ok {
@@ -111,7 +111,7 @@ func TestBytesBatcherTriggerPushOverflow(t *testing.T) {
 
 	// The first batch should be sent, then the second batch should fail.
 	for i := 0; i < 2*bb.MaxBatchSize; i++ {
-		ok := bb.Push(func(b []byte) []byte {
+		ok := bb.Push(func(b []byte, _ int) []byte {
 			return append(b, "foobar"...)
 		})
 		if !ok {
@@ -120,7 +120,7 @@ func TestBytesBatcherTriggerPushOverflow(t *testing.T) {
 	}
 
 	// this push must fail, since bb.BatchFunc is hanging
-	if bb.Push(func(b []byte) []byte { return b }) {
+	if bb.Push(func(b []byte, _ int) []byte { return b }) {
 		t.Fatalf("expecting failed push")
 	}
 }
@@ -160,7 +160,7 @@ func TestBytesBatcherConcurrent(t *testing.T) {
 		go func(i int) {
 			var err error
 			for j := 0; j < iterationsCount; j++ {
-				if !bb.Push(func(b []byte) []byte { return append(b, "xxx"...) }) {
+				if !bb.Push(func(b []byte, _ int) []byte { return append(b, "xxx"...) }) {
 					err = fmt.Errorf("cannot push to batch from worker %d on iteration %d", i, j)
 					break
 				}

@@ -63,7 +63,7 @@ type BytesBatcher struct {
 //
 // The function returns false if the batch reached MaxBatchSize and BatchFunc
 // isn't returned yet.
-func (b *BytesBatcher) Push(appendFunc func(dst []byte) []byte) bool {
+func (b *BytesBatcher) Push(appendFunc func(dst []byte, rows int) []byte) bool {
 	b.once.Do(b.init)
 	b.lock.Lock()
 	if b.items >= b.MaxBatchSize && !b.execNolock() {
@@ -75,8 +75,8 @@ func (b *BytesBatcher) Push(appendFunc func(dst []byte) []byte) bool {
 			b.b = b.HeaderFunc(b.b)
 		}
 	}
+	b.b = appendFunc(b.b, b.items)
 	b.items++
-	b.b = appendFunc(b.b)
 	if b.items >= b.MaxBatchSize {
 		b.execNolockNocheck()
 	}
