@@ -71,7 +71,7 @@ func (b *Batcher) Stop() {
 }
 
 // Push pushes new item into the batcher.
-//
+// Push return false if there is an overflow
 // Don't forget calling Start() before pushing items into the batcher.
 func (b *Batcher) Push(x interface{}) bool {
 	if b.ch == nil {
@@ -83,6 +83,15 @@ func (b *Batcher) Push(x interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// PushGuaranteed pushes new item into the batcher.
+// PushGuaranteed waits for the queue to be unblocked when pushing a new item
+func (b *Batcher) PushGuaranteed(x interface{}) {
+	if b.ch == nil {
+		panic("BUG: forgot calling GenericBatcher.Start()?")
+	}
+	b.ch <- x
 }
 
 // QueueLen returns the number of pending items, which weren't passed into

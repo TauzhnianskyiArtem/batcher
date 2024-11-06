@@ -85,6 +85,15 @@ func (b *GenericBatcher[T]) Push(x T) bool {
 	}
 }
 
+// PushGuaranteed pushes new item into the batcher.
+// PushGuaranteed waits for the queue to be unblocked when pushing a new item
+func (b *GenericBatcher[T]) PushGuaranteed(x T) {
+	if b.ch == nil {
+		panic("BUG: forgot calling GenericBatcher.Start()?")
+	}
+	b.ch <- x
+}
+
 // QueueLen returns the number of pending items, which weren't passed into
 // BatcherFunc yet.
 //
