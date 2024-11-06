@@ -71,7 +71,6 @@ func (b *GenericBatcher[T]) Stop() {
 }
 
 // Push pushes new item into the batcher.
-//
 // Don't forget calling Start() before pushing items into the batcher.
 func (b *GenericBatcher[T]) Push(x T) bool {
 	if b.ch == nil {
