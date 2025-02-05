@@ -48,12 +48,20 @@ type BytesBatcher struct {
 	// unless MaxBatchSize is reached.
 	MaxDelay time.Duration
 
+	stopped      bool
 	once         sync.Once
 	lock         sync.Mutex
 	b            []byte
 	pendingB     []byte
 	items        int
 	lastExecTime time.Time
+}
+
+func (b *BytesBatcher) Stop() {
+	b.lock.Lock()
+	b.stopped = true
+	b.execNolockNocheck()
+	b.lock.Unlock()
 }
 
 // Push calls appendFunc on a byte slice.
@@ -66,6 +74,10 @@ type BytesBatcher struct {
 func (b *BytesBatcher) Push(appendFunc func(dst []byte, rows int) []byte) bool {
 	b.once.Do(b.init)
 	b.lock.Lock()
+	if b.stopped {
+		b.lock.Unlock()
+		return false
+	}
 	if b.items >= b.MaxBatchSize && !b.execNolock() {
 		b.lock.Unlock()
 		return false
