@@ -60,7 +60,7 @@ type BytesBatcher struct {
 func (b *BytesBatcher) Stop() {
 	b.lock.Lock()
 	b.stopped = true
-	b.execNolockNocheck()
+	b.execNolock(false)
 	b.lock.Unlock()
 }
 
@@ -78,7 +78,7 @@ func (b *BytesBatcher) Push(appendFunc func(dst []byte, rows int) []byte) bool {
 		b.lock.Unlock()
 		return false
 	}
-	if b.items >= b.MaxBatchSize && !b.execNolock() {
+	if b.items >= b.MaxBatchSize && !b.execNolock(true) {
 		b.lock.Unlock()
 		return false
 	}
@@ -121,10 +121,10 @@ func (b *BytesBatcher) execNolockNocheck() {
 	// Do not check the returned value, since the previous batch
 	// may be still pending in BatchFunc.
 	// The error will be discovered on the next Push.
-	b.execNolock()
+	b.execNolock(true)
 }
 
-func (b *BytesBatcher) execNolock() bool {
+func (b *BytesBatcher) execNolock(parallel bool) bool {
 	if len(b.pendingB) > 0 {
 		return false
 	}
@@ -136,19 +136,26 @@ func (b *BytesBatcher) execNolock() bool {
 	items := b.items
 	b.items = 0
 	b.lastExecTime = time.Now()
-	go func(data []byte, items int) {
-		b.BatchFunc(data, items)
-		b.lock.Lock()
-		b.pendingB = b.pendingB[:0]
-		if cap(b.pendingB) > 64*1024 {
-			// A hack: throw big pendingB slice to GC in order
-			// to reduce memory usage between BatchFunc calls.
-			//
-			// Keep small pendingB slices in order to reduce
-			// load on GC.
-			b.pendingB = nil
-		}
-		b.lock.Unlock()
-	}(b.pendingB, items)
+
+	if parallel {
+		go func(data []byte, items int) {
+			b.BatchFunc(data, items)
+			b.lock.Lock()
+			b.pendingB = b.pendingB[:0]
+			if cap(b.pendingB) > 64*1024 {
+				// A hack: throw big pendingB slice to GC in order
+				// to reduce memory usage between BatchFunc calls.
+				//
+				// Keep small pendingB slices in order to reduce
+				// load on GC.
+				b.pendingB = nil
+			}
+			b.lock.Unlock()
+		}(b.pendingB, items)
+	} else {
+		b.BatchFunc(b.pendingB, items)
+		b.pendingB = nil
+	}
+
 	return true
 }
