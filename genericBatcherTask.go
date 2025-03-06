@@ -124,6 +124,7 @@ func processGenericBatchesTask[T any](f GenericBatcherTaskFunc[T], ch <-chan *T,
 		case x, ok = <-ch:
 			if !ok {
 				callGenericTask(f, batch)
+				lastPushTime = time.Now()
 				return
 			}
 			batch = append(batch, x)
@@ -132,6 +133,7 @@ func processGenericBatchesTask[T any](f GenericBatcherTaskFunc[T], ch <-chan *T,
 				x, ok = <-ch
 				if !ok {
 					callGenericTask(f, batch)
+					lastPushTime = time.Now()
 					return
 				}
 				batch = append(batch, x)
@@ -142,6 +144,7 @@ func processGenericBatchesTask[T any](f GenericBatcherTaskFunc[T], ch <-chan *T,
 					case x, ok = <-ch:
 						if !ok {
 							callGenericTask(f, batch)
+							lastPushTime = time.Now()
 							return
 						}
 						batch = append(batch, x)
@@ -153,8 +156,8 @@ func processGenericBatchesTask[T any](f GenericBatcherTaskFunc[T], ch <-chan *T,
 		}
 
 		if len(batch) >= maxBatchSize || time.Since(lastPushTime) > maxDelay {
-			lastPushTime = time.Now()
 			callGenericTask(f, batch)
+			lastPushTime = time.Now()
 			batch = batch[:0]
 		}
 	}

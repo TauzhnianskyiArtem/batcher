@@ -112,6 +112,7 @@ func processBatches(f BatcherFunc, ch <-chan interface{}, maxBatchSize int, maxD
 		case x, ok = <-ch:
 			if !ok {
 				call(f, batch)
+				lastPushTime = time.Now()
 				return
 			}
 			batch = append(batch, x)
@@ -120,6 +121,7 @@ func processBatches(f BatcherFunc, ch <-chan interface{}, maxBatchSize int, maxD
 				x, ok = <-ch
 				if !ok {
 					call(f, batch)
+					lastPushTime = time.Now()
 					return
 				}
 				batch = append(batch, x)
@@ -130,6 +132,7 @@ func processBatches(f BatcherFunc, ch <-chan interface{}, maxBatchSize int, maxD
 					case x, ok = <-ch:
 						if !ok {
 							call(f, batch)
+							lastPushTime = time.Now()
 							return
 						}
 						batch = append(batch, x)
@@ -141,8 +144,8 @@ func processBatches(f BatcherFunc, ch <-chan interface{}, maxBatchSize int, maxD
 		}
 
 		if len(batch) >= maxBatchSize || time.Since(lastPushTime) > maxDelay {
-			lastPushTime = time.Now()
 			call(f, batch)
+			lastPushTime = time.Now()
 			batch = batch[:0]
 		}
 	}
