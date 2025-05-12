@@ -22,8 +22,13 @@ type GenericBatcher[T any] struct {
 	// Maximum unprocessed items' queue size.
 	QueueSize int
 
-	ch     chan T
-	doneCh chan struct{}
+	// MaxConcurrency limits the number of concurrent goroutines processing batches
+	// Default is 100
+	MaxConcurrency int
+
+	ch        chan T
+	doneCh    chan struct{}
+	semaphore chan struct{}
 }
 
 // GenericBatcherFunc is called by GenericBatcher when batch is ready to be processed.
@@ -50,11 +55,16 @@ func (b *GenericBatcher[T]) Start() {
 	if b.MaxDelay <= 0 {
 		b.MaxDelay = time.Millisecond
 	}
+	if b.MaxConcurrency <= 0 {
+		b.MaxConcurrency = 100
+	}
 
 	b.ch = make(chan T, b.QueueSize)
 	b.doneCh = make(chan struct{})
+	b.semaphore = make(chan struct{}, b.MaxConcurrency)
+
 	go func() {
-		processGenericBatches(b.Func, b.ch, b.MaxBatchSize, b.MaxDelay)
+		processGenericBatches(b.Func, b.ch, b.MaxBatchSize, b.MaxDelay, b.semaphore)
 		close(b.doneCh)
 	}()
 }
@@ -68,6 +78,7 @@ func (b *GenericBatcher[T]) Stop() {
 	<-b.doneCh
 	b.ch = nil
 	b.doneCh = nil
+	b.semaphore = nil
 }
 
 // Push pushes new item into the batcher.
@@ -101,48 +112,79 @@ func (b *GenericBatcher[T]) QueueLen() int {
 	return len(b.ch)
 }
 
-func processGenericBatches[T any](f GenericBatcherFunc[T], ch <-chan T, maxBatchSize int, maxDelay time.Duration) {
+func processGenericBatches[T any](f GenericBatcherFunc[T], ch <-chan T, maxBatchSize int, maxDelay time.Duration, semaphore chan struct{}) {
 	var batch []T
 	var x T
 	var ok bool
 	lastPushTime := time.Now()
+
+	// Create the batch with the right capacity to avoid reallocations
+	batch = make([]T, 0, maxBatchSize)
+
 	for {
 		select {
 		case x, ok = <-ch:
 			if !ok {
-				callGeneric(f, batch)
+				// When the channel is closed, process any remaining items
+				if len(batch) > 0 {
+					f(batch)
+				}
 				return
 			}
 			batch = append(batch, x)
+
+			// If we've reached maxBatchSize, process immediately
+			if len(batch) >= maxBatchSize {
+				f(batch)
+				batch = batch[:0]
+				lastPushTime = time.Now()
+			}
 		default:
 			if len(batch) == 0 {
+				// Wait for at least one item
 				x, ok = <-ch
 				if !ok {
-					callGeneric(f, batch)
 					return
 				}
 				batch = append(batch, x)
+				lastPushTime = time.Now()
 			} else {
-				if delay := maxDelay - time.Since(lastPushTime); delay > 0 {
-					t := acquireTimer(delay)
+				// Check if we've reached the timeout
+				sinceLastPush := time.Since(lastPushTime)
+				if sinceLastPush >= maxDelay {
+					f(batch)
+					batch = batch[:0]
+					lastPushTime = time.Now()
+				} else {
+					// Wait for either a new item or the timeout
+					t := acquireTimer(maxDelay - sinceLastPush)
 					select {
 					case x, ok = <-ch:
 						if !ok {
-							callGeneric(f, batch)
+							// Channel closed, process remaining items
+							if len(batch) > 0 {
+								f(batch)
+							}
+							releaseTimer(t)
 							return
 						}
 						batch = append(batch, x)
+
+						// If we've reached maxBatchSize, process immediately
+						if len(batch) >= maxBatchSize {
+							f(batch)
+							batch = batch[:0]
+							lastPushTime = time.Now()
+						}
 					case <-t.C:
+						// Timeout reached, process the batch
+						f(batch)
+						batch = batch[:0]
+						lastPushTime = time.Now()
 					}
 					releaseTimer(t)
 				}
 			}
-		}
-
-		if len(batch) >= maxBatchSize || time.Since(lastPushTime) > maxDelay {
-			lastPushTime = time.Now()
-			callGeneric(f, batch)
-			batch = batch[:0]
 		}
 	}
 }

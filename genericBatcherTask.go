@@ -15,6 +15,7 @@ type Task[Req any, Res any] struct {
 
 func (task *Task[Req, Res]) Done(err error) {
 	task.doneCh <- err
+	close(task.doneCh)
 }
 
 // GenericBatcherTask groups items in batches and calls Func on them.
@@ -33,8 +34,13 @@ type GenericBatcherTask[Req any, Res any] struct {
 	// Maximum unprocessed items' queue size.
 	QueueSize int
 
-	ch     chan *Task[Req, Res]
-	doneCh chan struct{}
+	// MaxConcurrency limits the number of concurrent goroutines processing batches
+	// Default is 100
+	MaxConcurrency int
+
+	ch        chan *Task[Req, Res]
+	doneCh    chan struct{}
+	semaphore chan struct{}
 }
 
 // GenericBatcherTaskFunc is called by GenericBatcherTask when batch is ready to be processed.
@@ -61,11 +67,16 @@ func (b *GenericBatcherTask[Req, Res]) Start() {
 	if b.MaxDelay <= 0 {
 		b.MaxDelay = time.Millisecond
 	}
+	if b.MaxConcurrency <= 0 {
+		b.MaxConcurrency = 100
+	}
 
 	b.ch = make(chan *Task[Req, Res], b.QueueSize)
 	b.doneCh = make(chan struct{})
+	b.semaphore = make(chan struct{}, b.MaxConcurrency)
+
 	go func() {
-		processGenericBatchesTask(b.Func, b.ch, b.MaxBatchSize, b.MaxDelay)
+		processGenericBatchesTask(b.Func, b.ch, b.MaxBatchSize, b.MaxDelay, b.semaphore)
 		close(b.doneCh)
 	}()
 }
@@ -79,6 +90,7 @@ func (b *GenericBatcherTask[Req, Res]) Stop() {
 	<-b.doneCh
 	b.ch = nil
 	b.doneCh = nil
+	b.semaphore = nil
 }
 
 // Do pushes new item into the batcher.
@@ -97,13 +109,19 @@ func (b *GenericBatcherTask[Req, Res]) Do(req Req) (resp Res, err error) {
 		Req:    req,
 		doneCh: chv.(chan error)}
 
-	b.ch <- task
-	err = <-task.doneCh
-	errorChPool.Put(chv)
-	if nil == err {
-		resp = task.Res
+	select {
+	case b.ch <- task:
+		err = <-task.doneCh
+		errorChPool.Put(chv)
+		if nil == err {
+			resp = task.Res
+		}
+		return
+	default:
+		var zero Res
+		errorChPool.Put(chv)
+		return zero, ErrBatcherOverflow
 	}
-	return
 }
 
 // QueueLen returns the number of pending items, which weren't passed into
@@ -114,51 +132,79 @@ func (b *GenericBatcherTask[Req, Res]) QueueLen() int {
 	return len(b.ch)
 }
 
-func processGenericBatchesTask[T any](f GenericBatcherTaskFunc[T], ch <-chan *T, maxBatchSize int, maxDelay time.Duration) {
+func processGenericBatchesTask[T any](f GenericBatcherTaskFunc[T], ch <-chan *T, maxBatchSize int, maxDelay time.Duration, semaphore chan struct{}) {
 	var batch []*T
 	var x *T
 	var ok bool
 	lastPushTime := time.Now()
+
+	// Create the batch with the right capacity to avoid reallocations
+	batch = make([]*T, 0, maxBatchSize)
+
 	for {
 		select {
 		case x, ok = <-ch:
 			if !ok {
-				callGenericTask(f, batch)
-				lastPushTime = time.Now()
+				// When the channel is closed, process any remaining items
+				if len(batch) > 0 {
+					f(batch)
+				}
 				return
 			}
 			batch = append(batch, x)
+
+			// If we've reached maxBatchSize, process immediately
+			if len(batch) >= maxBatchSize {
+				f(batch)
+				batch = batch[:0]
+				lastPushTime = time.Now()
+			}
 		default:
 			if len(batch) == 0 {
+				// Wait for at least one item
 				x, ok = <-ch
 				if !ok {
-					callGenericTask(f, batch)
-					lastPushTime = time.Now()
 					return
 				}
 				batch = append(batch, x)
+				lastPushTime = time.Now()
 			} else {
-				if delay := maxDelay - time.Since(lastPushTime); delay > 0 {
-					t := acquireTimer(delay)
+				// Check if we've reached the timeout
+				sinceLastPush := time.Since(lastPushTime)
+				if sinceLastPush >= maxDelay {
+					f(batch)
+					batch = batch[:0]
+					lastPushTime = time.Now()
+				} else {
+					// Wait for either a new item or the timeout
+					t := acquireTimer(maxDelay - sinceLastPush)
 					select {
 					case x, ok = <-ch:
 						if !ok {
-							callGenericTask(f, batch)
-							lastPushTime = time.Now()
+							// Channel closed, process remaining items
+							if len(batch) > 0 {
+								f(batch)
+							}
+							releaseTimer(t)
 							return
 						}
 						batch = append(batch, x)
+
+						// If we've reached maxBatchSize, process immediately
+						if len(batch) >= maxBatchSize {
+							f(batch)
+							batch = batch[:0]
+							lastPushTime = time.Now()
+						}
 					case <-t.C:
+						// Timeout reached, process the batch
+						f(batch)
+						batch = batch[:0]
+						lastPushTime = time.Now()
 					}
 					releaseTimer(t)
 				}
 			}
-		}
-
-		if len(batch) >= maxBatchSize || time.Since(lastPushTime) > maxDelay {
-			callGenericTask(f, batch)
-			lastPushTime = time.Now()
-			batch = batch[:0]
 		}
 	}
 }
@@ -170,3 +216,12 @@ func callGenericTask[T any](f GenericBatcherTaskFunc[T], batch []*T) {
 }
 
 var errorChPool sync.Pool
+
+// ErrBatcherOverflow is returned when the batcher queue is full
+var ErrBatcherOverflow = error(batOverflow("batcher overflow"))
+
+type batOverflow string
+
+func (bo batOverflow) Error() string {
+	return string(bo)
+}

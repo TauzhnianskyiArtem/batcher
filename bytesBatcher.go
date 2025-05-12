@@ -48,6 +48,10 @@ type BytesBatcher struct {
 	// unless MaxBatchSize is reached.
 	MaxDelay time.Duration
 
+	// MaxConcurrency limits the number of concurrent goroutines processing batches
+	// Default is 100
+	MaxConcurrency int
+
 	stopped      bool
 	once         sync.Once
 	lock         sync.Mutex
@@ -55,11 +59,16 @@ type BytesBatcher struct {
 	pendingB     []byte
 	items        int
 	lastExecTime time.Time
+	closeCh      chan struct{}
+	semaphore    chan struct{}
 }
 
 func (b *BytesBatcher) Stop() {
 	b.lock.Lock()
 	b.stopped = true
+	if b.closeCh != nil {
+		close(b.closeCh)
+	}
 	b.execNolock(false)
 	b.lock.Unlock()
 }
@@ -97,22 +106,37 @@ func (b *BytesBatcher) Push(appendFunc func(dst []byte, rows int) []byte) bool {
 }
 
 func (b *BytesBatcher) init() {
+	if b.MaxConcurrency <= 0 {
+		b.MaxConcurrency = 100
+	}
+
+	b.closeCh = make(chan struct{})
+	b.semaphore = make(chan struct{}, b.MaxConcurrency)
+
 	go func() {
 		maxDelay := b.MaxDelay
 		delay := maxDelay
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+
 		for {
-			time.Sleep(delay)
-			b.lock.Lock()
-			d := time.Since(b.lastExecTime)
-			if float64(d) > 0.9*float64(maxDelay) {
-				if b.items > 0 {
-					b.execNolockNocheck()
+			select {
+			case <-timer.C:
+				b.lock.Lock()
+				d := time.Since(b.lastExecTime)
+				if float64(d) > 0.9*float64(maxDelay) {
+					if b.items > 0 {
+						b.execNolockNocheck()
+					}
+					delay = maxDelay
+				} else {
+					delay = maxDelay - d
 				}
-				delay = maxDelay
-			} else {
-				delay = maxDelay - d
+				timer.Reset(delay)
+				b.lock.Unlock()
+			case <-b.closeCh:
+				return
 			}
-			b.lock.Unlock()
 		}
 	}()
 }
@@ -138,20 +162,36 @@ func (b *BytesBatcher) execNolock(parallel bool) bool {
 	b.lastExecTime = time.Now()
 
 	if parallel {
-		go func(data []byte, items int) {
-			b.BatchFunc(data, items)
-			b.lock.Lock()
+		// Create a local copy to avoid race conditions
+		data := b.pendingB
+		itemCount := items
+
+		// Use semaphore to limit concurrent goroutines
+		select {
+		case b.semaphore <- struct{}{}:
+			go func() {
+				defer func() { <-b.semaphore }()
+				b.BatchFunc(data, itemCount)
+				b.lock.Lock()
+				b.pendingB = b.pendingB[:0]
+				if cap(b.pendingB) > 64*1024 {
+					// A hack: throw big pendingB slice to GC in order
+					// to reduce memory usage between BatchFunc calls.
+					//
+					// Keep small pendingB slices in order to reduce
+					// load on GC.
+					b.pendingB = nil
+				}
+				b.lock.Unlock()
+			}()
+		default:
+			// If we can't get a semaphore slot, process synchronously
+			b.BatchFunc(data, itemCount)
 			b.pendingB = b.pendingB[:0]
 			if cap(b.pendingB) > 64*1024 {
-				// A hack: throw big pendingB slice to GC in order
-				// to reduce memory usage between BatchFunc calls.
-				//
-				// Keep small pendingB slices in order to reduce
-				// load on GC.
 				b.pendingB = nil
 			}
-			b.lock.Unlock()
-		}(b.pendingB, items)
+		}
 	} else {
 		b.BatchFunc(b.pendingB, items)
 		b.pendingB = nil
