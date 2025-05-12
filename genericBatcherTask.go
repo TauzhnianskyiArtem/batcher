@@ -11,22 +11,15 @@ type Task[Req any, Res any] struct {
 	Req    Req
 	Res    Res
 	doneCh chan error
+	done   sync.Once // Ensures Done is called only once
 }
 
 func (task *Task[Req, Res]) Done(err error) {
-	select {
-	case task.doneCh <- err:
-	default:
-		// Channel might be closed or full, we can't send
-	}
-
-	// Only close if we haven't already done so
-	select {
-	case <-task.doneCh:
-		// Channel is already closed or empty after send
-	default:
+	task.done.Do(func() {
+		// Safe to send and close since we're using once.Do
+		task.doneCh <- err
 		close(task.doneCh)
-	}
+	})
 }
 
 // GenericBatcherTask groups items in batches and calls Func on them.
