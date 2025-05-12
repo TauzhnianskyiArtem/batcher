@@ -14,8 +14,19 @@ type Task[Req any, Res any] struct {
 }
 
 func (task *Task[Req, Res]) Done(err error) {
-	task.doneCh <- err
-	close(task.doneCh)
+	select {
+	case task.doneCh <- err:
+	default:
+		// Channel might be closed or full, we can't send
+	}
+
+	// Only close if we haven't already done so
+	select {
+	case <-task.doneCh:
+		// Channel is already closed or empty after send
+	default:
+		close(task.doneCh)
+	}
 }
 
 // GenericBatcherTask groups items in batches and calls Func on them.
