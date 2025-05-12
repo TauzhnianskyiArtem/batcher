@@ -1,3 +1,3 @@
-module github.com/aradilov/batcher
+module github.com/TauzhnianskyiArtem/batcher
 
 go 1.22.0

@@ -15,7 +15,12 @@ func acquireTimer(timeout time.Duration) *time.Timer {
 
 	t := tv.(*time.Timer)
 	if t.Reset(timeout) {
-		panic("BUG: Active timer trapped into AcquireTimer()")
+		// If the timer has been active and Reset was called,
+		// we need to drain the channel to avoid leaks
+		select {
+		case <-t.C:
+		default:
+		}
 	}
 	return t
 }
