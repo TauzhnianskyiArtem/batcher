@@ -55,11 +55,22 @@ type BytesBatcher struct {
 	pendingB     []byte
 	items        int
 	lastExecTime time.Time
+	stopCh       chan struct{} // Channel to signal the background goroutine to stop
 }
 
 func (b *BytesBatcher) Stop() {
 	b.lock.Lock()
+	if b.stopped {
+		b.lock.Unlock()
+		return
+	}
 	b.stopped = true
+
+	// Signal the background goroutine to stop if it was started
+	if b.stopCh != nil {
+		close(b.stopCh)
+	}
+
 	b.execNolock(false)
 	b.lock.Unlock()
 }
@@ -97,22 +108,32 @@ func (b *BytesBatcher) Push(appendFunc func(dst []byte, rows int) []byte) bool {
 }
 
 func (b *BytesBatcher) init() {
+	b.stopCh = make(chan struct{})
+
 	go func() {
 		maxDelay := b.MaxDelay
 		delay := maxDelay
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+
 		for {
-			time.Sleep(delay)
-			b.lock.Lock()
-			d := time.Since(b.lastExecTime)
-			if float64(d) > 0.9*float64(maxDelay) {
-				if b.items > 0 {
-					b.execNolockNocheck()
+			select {
+			case <-timer.C:
+				b.lock.Lock()
+				d := time.Since(b.lastExecTime)
+				if float64(d) > 0.9*float64(maxDelay) {
+					if b.items > 0 {
+						b.execNolockNocheck()
+					}
+					delay = maxDelay
+				} else {
+					delay = maxDelay - d
 				}
-				delay = maxDelay
-			} else {
-				delay = maxDelay - d
+				timer.Reset(delay)
+				b.lock.Unlock()
+			case <-b.stopCh:
+				return // Exit the goroutine when Stop is called
 			}
-			b.lock.Unlock()
 		}
 	}()
 }

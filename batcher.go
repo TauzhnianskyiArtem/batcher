@@ -22,6 +22,9 @@ type Batcher struct {
 	// Maximum unprocessed items' queue size.
 	QueueSize int
 
+	// Connection timeout for pushing items
+	PushTimeout time.Duration
+
 	ch     chan interface{}
 	doneCh chan struct{}
 }
@@ -50,6 +53,9 @@ func (b *Batcher) Start() {
 	if b.MaxDelay <= 0 {
 		b.MaxDelay = time.Millisecond
 	}
+	if b.PushTimeout <= 0 {
+		b.PushTimeout = 5 * time.Second
+	}
 
 	b.ch = make(chan interface{}, b.QueueSize)
 	b.doneCh = make(chan struct{})
@@ -77,9 +83,13 @@ func (b *Batcher) Push(x interface{}) bool {
 	if b.ch == nil {
 		panic("BUG: forgot calling Batcher.Start()?")
 	}
+
+	// Use a timeout to avoid blocking indefinitely
 	select {
 	case b.ch <- x:
 		return true
+	case <-time.After(b.PushTimeout):
+		return false
 	default:
 		return false
 	}
@@ -87,11 +97,18 @@ func (b *Batcher) Push(x interface{}) bool {
 
 // PushGuaranteed pushes new item into the batcher.
 // PushGuaranteed waits for the queue to be unblocked when pushing a new item
-func (b *Batcher) PushGuaranteed(x interface{}) {
+func (b *Batcher) PushGuaranteed(x interface{}) bool {
 	if b.ch == nil {
 		panic("BUG: forgot calling GenericBatcher.Start()?")
 	}
-	b.ch <- x
+
+	// Use a timeout to avoid blocking indefinitely
+	select {
+	case b.ch <- x:
+		return true
+	case <-time.After(b.PushTimeout):
+		return false
+	}
 }
 
 // QueueLen returns the number of pending items, which weren't passed into

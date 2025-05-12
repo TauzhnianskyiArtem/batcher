@@ -14,7 +14,11 @@ type Task[Req any, Res any] struct {
 }
 
 func (task *Task[Req, Res]) Done(err error) {
-	task.doneCh <- err
+	select {
+	case task.doneCh <- err:
+	default:
+		// If channel is already closed, avoid panic
+	}
 }
 
 // GenericBatcherTask groups items in batches and calls Func on them.
@@ -97,8 +101,28 @@ func (b *GenericBatcherTask[Req, Res]) Do(req Req) (resp Res, err error) {
 		Req:    req,
 		doneCh: chv.(chan error)}
 
-	b.ch <- task
-	err = <-task.doneCh
+	// Use a timeout for sending the task to avoid blocking forever
+	select {
+	case b.ch <- task:
+		// Successfully sent task to channel
+	case <-time.After(5 * time.Second):
+		// Timed out trying to send task
+		var zeroRes Res
+		errorChPool.Put(chv)
+		return zeroRes, ErrQueueFull
+	}
+
+	// Use a timeout for receiving the result
+	select {
+	case err = <-task.doneCh:
+		// Got response
+	case <-time.After(30 * time.Second):
+		// Timed out waiting for response
+		var zeroRes Res
+		errorChPool.Put(chv)
+		return zeroRes, ErrProcessingTimeout
+	}
+
 	errorChPool.Put(chv)
 	if nil == err {
 		resp = task.Res
@@ -167,3 +191,18 @@ func callGenericTask[T any](f GenericBatcherTaskFunc[T], batch []*T) {
 }
 
 var errorChPool sync.Pool
+
+// Error types
+var (
+	ErrQueueFull         = &timeoutError{"batcher queue is full, cannot accept more requests"}
+	ErrProcessingTimeout = &timeoutError{"timeout while processing batch request"}
+)
+
+// Define a custom error type for timeout errors
+type timeoutError struct {
+	message string
+}
+
+func (e *timeoutError) Error() string {
+	return e.message
+}
